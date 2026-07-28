@@ -21,7 +21,7 @@ DOMAIN_KEY = "09_bond_energy_pathways"
 def build_project_context() -> dict[str, object]:
     """Return metadata plus a shared mechanics sanity check."""
     domain_info = DOMAINS[DOMAIN_KEY]
-    baseline = run_mass_spring_demo()
+    baseline = run_mass_spring_demo(domain_key=DOMAIN_KEY)
 
     return {
         "domain_key": DOMAIN_KEY,

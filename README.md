@@ -51,6 +51,23 @@ The shared scientific-principles API lives in `src/physics_core/scientific_princ
 - `diffusion_equation_residual`
 - `principle_registry`
 
+Extended operators and methods:
+
+- `divergence_vector_field`
+- `curl_vector_field`
+- `laplacian_scalar_field`
+- `spherical_to_cartesian`
+- `cartesian_to_spherical`
+- `radial_laplacian_spherical`
+- `greens_function_poisson_3d`
+- `greens_function_helmholtz_3d`
+- `greens_function_heat_kernel_1d`
+- `incompressible_navier_stokes_residual_2d`
+- `discrete_fourier_transform`
+- `inverse_discrete_fourier_transform`
+- `discrete_wavelet_transform_haar`
+- `inverse_discrete_wavelet_transform_haar`
+
 These are intended to be imported and reused in any project folder or external repository.
 
 ## Domain Folders
@@ -103,6 +120,14 @@ python projects/01_celestial_mechanics/simulation.py
 
 The output is JSON containing domain metadata, a baseline mass-spring mechanics sanity check, and suggested next steps for fitting real data.
 
+Each simulation now also includes domain-aware diagnostics where applicable, such as:
+
+- Vector calculus (`div`, `curl`, `laplacian`) on sample fields
+- Spherical coordinate modeling checks
+- Green's-function evaluations for Poisson/Helmholtz/heat kernels
+- Navier-Stokes residual diagnostics for fluid-like domains
+- DFT/DWT spectral diagnostics for signal/spectroscopy/wave domains
+
 ## Suggested Next Build Step
 
 Pick one domain folder and add:
@@ -111,4 +136,3 @@ Pick one domain folder and add:
 2. A model file (`model.py`) with your domain-specific Hamiltonian/Lagrangian terms.
 3. A trainer/inference script (`fit.py`) for parameter estimation.
 4. Validation checks using `check_energy_conservation`, wave/diffusion residuals, or custom invariants.
-
