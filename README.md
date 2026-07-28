@@ -111,3 +111,4 @@ Pick one domain folder and add:
 2. A model file (`model.py`) with your domain-specific Hamiltonian/Lagrangian terms.
 3. A trainer/inference script (`fit.py`) for parameter estimation.
 4. Validation checks using `check_energy_conservation`, wave/diffusion residuals, or custom invariants.
+
