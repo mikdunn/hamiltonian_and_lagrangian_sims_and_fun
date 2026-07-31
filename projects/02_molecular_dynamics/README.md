@@ -23,3 +23,9 @@ Run the local starter simulation:
 ```bash
 python projects/02_molecular_dynamics/simulation.py
 ```
+
+Run a headless thermodynamic combustion check (shows CH4 oxidation products):
+
+```bash
+python projects/02_molecular_dynamics/simulation.py --no-ui --phase gas --mixture CH4:6,O2:12,N2:4 --temperature 980
+```

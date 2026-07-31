@@ -1,0 +1,11 @@
+ 107 | 978-3-031-71400-9.pdf | entropy:42, Gibbs:27, free\s+energy:17, chemical\s+potential:14, Helmholtz:5, enthalpy:2
+  57 | 978-3-032-20877-4.pdf | entropy:34, chemical\s+potential:11, enthalpy:7, Gibbs:2, free\s+energy:2, Helmholtz:1
+  40 | 978-3-032-00902-9.pdf | entropy:20, enthalpy:16, Gibbs:2, equilibrium\s+constant:1, Helmholtz:1
+  27 | 978-3-031-77929-9.pdf | free\s+energy:9, entropy:7, Helmholtz:5, chemical\s+potential:3, Gibbs:1, equilibrium\s+constant:1
+  17 | 978-1-4614-2212-9.pdf | entropy:7, free\s+energy:4, van\s*[’\']?t\s*Hoff:3, enthalpy:3
+  15 | 978-3-031-90702-9.pdf | reaction\s+rate:10, activation\s+energy:3, Arrhenius:1, collision\s+theory:1
+   7 | 978-3-031-37196-7.pdf | Helmholtz:3, free\s+energy:2, enthalpy:2
+   4 | 978-3-319-95987-0.pdf | Helmholtz:4
+   2 | 978-981-95-0966-9.pdf | reaction\s+rate:2
+   2 | 978-3-030-55936-6.pdf | reaction\s+rate:2
+   1 | 978-3-319-89972-5.pdf | reaction\s+rate:1

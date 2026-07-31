@@ -23,7 +23,10 @@ except ImportError:  # pragma: no cover - notebook-only dependency path
 
 DOMAIN_KEY = "02_molecular_dynamics"
 DOMAIN_TITLE = "Molecular dynamics simulations"
-DEFAULT_MIXTURE = "H2O:6,N2:4,CH4:3"
+DEFAULT_MIXTURE = "CH4:6,O2:12,N2:4"
+DEFAULT_PHASE = "gas"
+DEFAULT_TEMPERATURE_K = 980.0
+DEFAULT_PRESSURE_PA = 101325.0
 
 ATOMIC_COLORS = {
     "H": "#f5f7fa",
@@ -154,6 +157,41 @@ def _safe_sigmoid(x: float) -> float:
 def _unit_tuple(vector: tuple[float, float, float] | np.ndarray) -> tuple[float, float, float]:
     arr = _normalize(np.asarray(vector, dtype=float))
     return (float(arr[0]), float(arr[1]), float(arr[2]))
+
+
+def _expand_species_packets(stoich: dict[str, float]) -> list[str]:
+    packets: list[str] = []
+    for name, value in stoich.items():
+        packets.extend([name] * max(0, int(round(value))))
+    return packets
+
+
+def _reaction_run_hint(mixture: dict[str, int], phase: str, temperature: float) -> str:
+    present_rules: list[ReactionRule] = []
+    for rule in REACTION_RULES:
+        if mixture.get(rule.reactants[0], 0) > 0 and mixture.get(rule.reactants[1], 0) > 0:
+            present_rules.append(rule)
+
+    if not present_rules:
+        if mixture.get("CH4", 0) > 0 and mixture.get("O2", 0) <= 0:
+            return "No oxidation pair present: methane combustion needs O2 to form CO2 and H2O."
+        if mixture.get("H2", 0) > 0 and mixture.get("O2", 0) <= 0:
+            return "No oxidation pair present: H2 oxidation needs O2 to form H2O."
+        return "No reactive pair present in this composition. Add a valid reactant pair from the listed equations."
+
+    if all(phase not in rule.allowed_phases for rule in present_rules):
+        allowed = sorted({ph for rule in present_rules for ph in rule.allowed_phases})
+        return f"Reactive pair detected, but current phase '{phase}' is not enabled. Try phase in {allowed}."
+
+    min_activation = min(rule.activation_temperature for rule in present_rules if phase in rule.allowed_phases)
+    if temperature < min_activation:
+        return (
+            f"Reactive pair detected, but temperature is below activation range. "
+            f"Try >= {min_activation:.0f} K for stronger conversion."
+        )
+
+    equations = "; ".join(rule.equation for rule in present_rules if phase in rule.allowed_phases)
+    return f"Reactive pair detected for: {equations}."
 
 
 TETRAHEDRAL = np.array(
@@ -515,6 +553,11 @@ def _apply_reactions(
             continue
 
         reactant_a, reactant_b = rule.reactants
+        reactant_packets = _expand_species_packets(rule.stoich_reactants)
+        product_packets = _expand_species_packets(rule.stoich_products)
+        total_reactant_packets = len(reactant_packets)
+        if total_reactant_packets == 0:
+            continue
         n_a = int(species_count.get(reactant_a, 0))
         n_b = int(species_count.get(reactant_b, 0))
         if n_a <= 0 or n_b <= 0:
@@ -628,21 +671,55 @@ def _apply_reactions(
             if i in reacted_indices or j in reacted_indices:
                 continue
 
-            old_mass_i = molecules[i].mass
-            old_mass_j = molecules[j].mass
-            momentum = old_mass_i * velocities[i] + old_mass_j * velocities[j]
+            participants: list[int] = [i, j]
+            used = {i, j}
+            needed = Counter(reactant_packets)
+            needed[molecules[i].name] -= 1
+            needed[molecules[j].name] -= 1
 
-            molecules[i] = MOLECULE_LIBRARY[rule.product]
-            molecules[j] = MOLECULE_LIBRARY[rule.byproduct]
-            species_count[reactant_a] = max(0, species_count.get(reactant_a, 0) - 1)
-            species_count[reactant_b] = max(0, species_count.get(reactant_b, 0) - 1)
-            species_count[rule.product] = species_count.get(rule.product, 0) + 1
-            species_count[rule.byproduct] = species_count.get(rule.byproduct, 0) + 1
+            event_midpoint = (centers[i] + 0.5 * displacement) % box_length
+            for species_name, remaining in list(needed.items()):
+                if remaining <= 0:
+                    continue
+                candidates_same = [
+                    idx
+                    for idx, molecule in enumerate(molecules)
+                    if molecule.name == species_name and idx not in reacted_indices and idx not in used
+                ]
+                if not candidates_same:
+                    participants = []
+                    break
 
-            new_mass_i = molecules[i].mass
-            new_mass_j = molecules[j].mass
+                distances = []
+                for idx in candidates_same:
+                    delta = _minimum_image(centers[idx] - event_midpoint, box_length)
+                    distances.append((float(np.linalg.norm(delta)), idx))
+                distances.sort(key=lambda item: item[0])
+                selected = [idx for _, idx in distances[: int(remaining)]]
+                if len(selected) < int(remaining):
+                    participants = []
+                    break
+                participants.extend(selected)
+                used.update(selected)
 
-            center_i = centers[i]
+            if len(participants) != total_reactant_packets:
+                continue
+
+            old_masses = np.array([molecules[idx].mass for idx in participants], dtype=float)
+            momentum = np.sum(old_masses[:, None] * velocities[participants], axis=0)
+
+            for species_name, nu in rule.stoich_reactants.items():
+                species_count[species_name] = max(0, species_count.get(species_name, 0) - int(round(nu)))
+
+            assigned_products = list(product_packets)
+            if len(assigned_products) < len(participants):
+                assigned_products.extend([rule.byproduct] * (len(participants) - len(assigned_products)))
+            assigned_products = assigned_products[: len(participants)]
+
+            for idx, product_name in zip(participants, assigned_products):
+                molecules[idx] = MOLECULE_LIBRARY[product_name]
+                species_count[product_name] = species_count.get(product_name, 0) + 1
+
             direction = displacement
             norm = float(np.linalg.norm(direction))
             if norm < 1e-9:
@@ -650,23 +727,24 @@ def _apply_reactions(
                 norm = float(np.linalg.norm(direction))
             direction = direction / max(norm, 1e-9)
 
-            midpoint = (center_i + 0.5 * displacement) % box_length
-            centers[i] = (midpoint + 0.12 * molecules[i].sigma * direction) % box_length
-            centers[j] = (midpoint - 0.12 * molecules[j].sigma * direction) % box_length
-
-            base_velocity = momentum / max(new_mass_i + new_mass_j, 1e-9)
+            new_masses = np.array([molecules[idx].mass for idx in participants], dtype=float)
+            base_velocity = momentum / max(float(np.sum(new_masses)), 1e-9)
             thermal_kick = rule.heat_release * math.sqrt(max(temperature, 0.05))
-            velocities[i] = base_velocity + direction * thermal_kick / max(new_mass_i, 1e-9)
-            velocities[j] = base_velocity - direction * thermal_kick / max(new_mass_j, 1e-9)
 
-            orientations[i] = _random_rotation_matrix(rng)
-            orientations[j] = _random_rotation_matrix(rng)
+            for slot, idx in enumerate(participants):
+                radial = _normalize(rng.normal(size=3) + 0.6 * direction)
+                if float(np.linalg.norm(radial)) < 1e-9:
+                    radial = direction
+                offset = 0.09 * molecules[idx].sigma * radial
+                centers[idx] = (event_midpoint + offset) % box_length
+                velocities[idx] = base_velocity + radial * thermal_kick / max(new_masses[slot], 1e-9)
+                orientations[idx] = _random_rotation_matrix(rng)
 
-            products[rule.product] += 1
+            for product_name in product_packets:
+                products[product_name] += 1
             total_heat += rule.heat_release
             events += 1
-            reacted_indices.add(i)
-            reacted_indices.add(j)
+            reacted_indices.update(participants)
 
     dt_safe = max(dt, 1e-12)
     for product_name, formed_count in products.items():
@@ -727,6 +805,16 @@ def _compute_kinematic_series(result: dict[str, object]) -> dict[str, np.ndarray
     }
 
 
+def _latest_thermo_snapshot(snapshots: list[dict[str, float]]) -> dict[str, float] | None:
+    if not snapshots:
+        return None
+
+    for snapshot in reversed(snapshots):
+        if snapshot.get("extent_packets", 0.0) > 0.0 or snapshot.get("rate_molar_per_s", 0.0) > 0.0:
+            return snapshot
+    return snapshots[-1]
+
+
 def render_reaction_diagnostics_png(result: dict[str, object]) -> bytes:
     kin = _compute_kinematic_series(result)
     products = result.get("product_history", {})
@@ -784,6 +872,8 @@ def render_reaction_diagnostics_png(result: dict[str, object]) -> bytes:
         elif vals.size < time.size:
             vals = np.pad(vals, (0, time.size - vals.size), mode="edge")
         vals = vals[: time.size]
+        baseline = float(vals[0]) if vals.size else 0.0
+        vals = vals - baseline
         total_products += vals
         axes[1, 1].plot(time, vals, label=name)
 
@@ -799,9 +889,9 @@ def render_reaction_diagnostics_png(result: dict[str, object]) -> bytes:
     thermo_history = result.get("thermodynamics_history", {})
     thermo_lines = ["Stoichiometric kinetics + thermodynamics:"]
     for equation, snapshots in thermo_history.items():
-        if not snapshots:
+        latest = _latest_thermo_snapshot(snapshots)
+        if latest is None:
             continue
-        latest = snapshots[-1]
         thermo_lines.append(
             f"{equation}: k={latest.get('k_forward', 0.0):.2e}, "
             f"K_eq={latest.get('K_eq', 1.0):.2e}, "
@@ -915,6 +1005,7 @@ def simulate_molecular_dynamics(
     }
 
     initial_counts = Counter(molecule.name for molecule in molecules)
+    initial_product_counts = {name: int(initial_counts.get(name, 0)) for name in product_names}
     for name in product_names:
         product_history[name].append(int(initial_counts.get(name, 0)))
 
@@ -1054,6 +1145,7 @@ def simulate_molecular_dynamics(
         "focus_species": dominant_species,
         "box_length_history": box_length_history,
         "product_history": product_history,
+        "initial_product_counts": initial_product_counts,
         "product_rate_history": product_rate_history,
         "reaction_heat_history": heat_history,
         "reaction_events_history": reaction_events_history,
@@ -1376,13 +1468,14 @@ def plot_simulation_motion_frame(
     product_history = result.get("product_history", {})
     product_rate_history = result.get("product_rate_history", {})
     if product_history:
-        overlay_lines = ["Products (count | rate):"]
+        overlay_lines = ["Products formed (net count | rate):"]
         for product in sorted(product_history):
             counts = np.asarray(product_history[product], dtype=float)
             rates = np.asarray(product_rate_history.get(product, []), dtype=float)
             idx = min(frame, max(0, counts.size - 1))
             ridx = min(frame, max(0, rates.size - 1))
-            count_value = counts[idx] if counts.size else 0.0
+            baseline = counts[0] if counts.size else 0.0
+            count_value = (counts[idx] - baseline) if counts.size else 0.0
             rate_value = rates[ridx] if rates.size else 0.0
             overlay_lines.append(f"{product}: {count_value:.0f} | {rate_value:.2f}/t")
 
@@ -1391,9 +1484,9 @@ def plot_simulation_motion_frame(
             overlay_lines.append("---")
             overlay_lines.append("Stoichiometric equations:")
             for equation, snapshots in thermo_history.items():
-                if not snapshots:
+                latest = _latest_thermo_snapshot(snapshots)
+                if latest is None:
                     continue
-                latest = snapshots[-1]
                 overlay_lines.append(
                     f"{equation} | K_eq={latest.get('K_eq', 1.0):.1e}, "
                     f"Q={latest.get('Q', 0.0):.1e}"
@@ -1433,8 +1526,9 @@ def summarize_simulation(result: dict[str, object]) -> dict[str, object]:
             final_products[name] = int(arr[-1])
     final_thermodynamics: dict[str, dict[str, float]] = {}
     for equation, hist in thermodynamics_history.items():
-        if hist:
-            final_thermodynamics[equation] = hist[-1]
+        latest = _latest_thermo_snapshot(hist)
+        if latest is not None:
+            final_thermodynamics[equation] = latest
 
     return {
         "domain_key": DOMAIN_KEY,
@@ -1484,10 +1578,10 @@ def launch_interactive_ui() -> None:
     figure = plt.figure(figsize=(14, 8))
     controls = {
         "mixture": DEFAULT_MIXTURE,
-        "phase": "liquid",
+        "phase": DEFAULT_PHASE,
         "volume_liters": _reference_volume_liters(sum(parse_mixture(DEFAULT_MIXTURE).values()), 1.0),
-        "temperature_kelvin": 300.0,
-        "pressure_pascal": 101325.0,
+        "temperature_kelvin": DEFAULT_TEMPERATURE_K,
+        "pressure_pascal": DEFAULT_PRESSURE_PA,
     }
 
     def redraw() -> None:
@@ -1535,7 +1629,7 @@ def launch_interactive_ui() -> None:
     reset_ax = plt.axes([0.03, 0.22, 0.10, 0.05])
 
     mix_box = TextBox(mix_ax, "Mixture", initial=controls["mixture"])
-    phase_buttons = RadioButtons(phase_ax, ("gas", "liquid", "solid"), active=1)
+    phase_buttons = RadioButtons(phase_ax, ("gas", "liquid", "solid"), active=0)
     volume_slider = Slider(volume_ax, "Volume (L)", 0.2 * controls["volume_liters"], 6.0 * controls["volume_liters"], valinit=controls["volume_liters"], valstep=0.05 * controls["volume_liters"])
     temp_slider = Slider(temp_ax, "Temp (K)", 150.0, 1400.0, valinit=controls["temperature_kelvin"], valstep=10.0)
     pressure_slider = Slider(pressure_ax, "Pressure (Pa)", 2.0e4, 5.0e5, valinit=controls["pressure_pascal"], valstep=2.0e3)
@@ -1557,7 +1651,7 @@ def launch_interactive_ui() -> None:
 
     def on_reset(_: object) -> None:
         mix_box.set_val(DEFAULT_MIXTURE)
-        phase_buttons.set_active(1)
+        phase_buttons.set_active(0)
         volume_slider.reset()
         temp_slider.reset()
         pressure_slider.reset()
@@ -1580,7 +1674,7 @@ def build_molecular_dynamics_notebook():
     diagnostics_image = widgets.Image(format="png")
     status = widgets.HTML(value="")
 
-    phase = widgets.ToggleButtons(options=[("Gas", "gas"), ("Liquid", "liquid"), ("Solid", "solid")], value="liquid", description="Phase")
+    phase = widgets.ToggleButtons(options=[("Gas", "gas"), ("Liquid", "liquid"), ("Solid", "solid")], value=DEFAULT_PHASE, description="Phase")
     default_molecule_count = sum(parse_mixture(DEFAULT_MIXTURE).values())
     default_volume_liters = _reference_volume_liters(default_molecule_count, 1.0)
     volume = widgets.FloatLogSlider(
@@ -1593,10 +1687,10 @@ def build_molecular_dynamics_notebook():
         readout_format=".3e",
         continuous_update=False,
     )
-    temperature = widgets.FloatSlider(description="Temperature (K)", value=300.0, min=120.0, max=1500.0, step=10.0, continuous_update=False)
+    temperature = widgets.FloatSlider(description="Temperature (K)", value=DEFAULT_TEMPERATURE_K, min=120.0, max=1500.0, step=10.0, continuous_update=False)
     pressure = widgets.FloatLogSlider(
         description="Pressure (Pa)",
-        value=101325.0,
+        value=DEFAULT_PRESSURE_PA,
         base=10,
         min=4.0,
         max=7.0,
@@ -1606,12 +1700,12 @@ def build_molecular_dynamics_notebook():
     )
     molarity = widgets.FloatSlider(description="Molarity (M)", value=1.0, min=0.2, max=3.0, step=0.05, continuous_update=False)
     reactions_enabled = widgets.Checkbox(value=True, description="Enable reactions")
-    species1 = widgets.Dropdown(options=molecule_options, value="H2O", description="Species 1")
-    count1 = widgets.IntSlider(description="Count 1", value=6, min=0, max=8, step=1, continuous_update=False)
-    species2 = widgets.Dropdown(options=molecule_options, value="N2", description="Species 2")
-    count2 = widgets.IntSlider(description="Count 2", value=4, min=0, max=8, step=1, continuous_update=False)
-    species3 = widgets.Dropdown(options=molecule_options, value="CH4", description="Species 3")
-    count3 = widgets.IntSlider(description="Count 3", value=3, min=0, max=8, step=1, continuous_update=False)
+    species1 = widgets.Dropdown(options=molecule_options, value="CH4", description="Species 1")
+    count1 = widgets.IntSlider(description="Count 1", value=6, min=0, max=12, step=1, continuous_update=False)
+    species2 = widgets.Dropdown(options=molecule_options, value="O2", description="Species 2")
+    count2 = widgets.IntSlider(description="Count 2", value=12, min=0, max=18, step=1, continuous_update=False)
+    species3 = widgets.Dropdown(options=molecule_options, value="N2", description="Species 3")
+    count3 = widgets.IntSlider(description="Count 3", value=4, min=0, max=12, step=1, continuous_update=False)
     play = widgets.Play(value=0, min=0, max=1, step=1, interval=35, description="Play", disabled=False)
     frame_slider = widgets.IntSlider(description="Frame", value=0, min=0, max=1, step=1, continuous_update=True)
     analyze_button = widgets.Button(description="Analyze Run", button_style="info")
@@ -1639,6 +1733,16 @@ def build_molecular_dynamics_notebook():
             (species2.value, count2.value),
             (species3.value, count3.value),
         )
+        total_count = int(sum(mixture.values()))
+        if total_count > 24:
+            status.value = (
+                "<b>Input limit:</b> total molecule count is "
+                f"{total_count}, but interactive mode supports at most 24. "
+                "Reduce one or more count sliders and try again."
+            )
+            diagnostics_ready = False
+            return
+        run_hint = _reaction_run_hint(mixture, phase.value, temperature.value)
         active_result = simulate_molecular_dynamics(
             mixture=mixture,
             phase=phase.value,
@@ -1671,11 +1775,22 @@ def build_molecular_dynamics_notebook():
         motion_image.value = frame_cache[0]
         diagnostics_image.value = b""
         diagnostics_ready = False
+        total_events = int(np.sum(np.asarray(active_result.get("reaction_events_history", [0]), dtype=int)))
+        if total_events <= 0:
+            status.value = (
+                "<b>No products formed in this run.</b> "
+                f"{run_hint} "
+                "If using methane, include O2 and use gas phase with higher temperature."
+            )
+            return
         status.value = (
             "<b>Ready:</b> composition is initialized at 1.0 M unless changed with the molarity slider. "
             "Press Play to start motion (faster playback, longer simulation window). "
             "Use the green arrows to read direction and relative speed. "
             "Reactions use thermodynamic driving (delta G) with an integrated rate law over each timestep. "
+            "Interactive mode supports up to 24 total molecules. "
+            "For visible combustion products (CO2/H2O), keep O2 present and use gas phase near or above 850 K. "
+            f"{run_hint} "
             "Sliders are in physical units: Kelvin, Liters, and Pascals. "
             "Diagnostics plots are generated after the run reaches the final frame, or by clicking Analyze Run. "
             "To change composition, stop, edit counts/species, then press Play again."
@@ -1746,12 +1861,12 @@ def build_molecular_dynamics_notebook():
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--no-ui", action="store_true", help="Run a headless simulation and print a JSON summary.")
-    parser.add_argument("--phase", choices=sorted(PHASE_PRESETS), default="liquid")
-    parser.add_argument("--mixture", default=DEFAULT_MIXTURE, help="Comma-separated Molecule:count entries, e.g. H2O:6,N2:4")
+    parser.add_argument("--phase", choices=sorted(PHASE_PRESETS), default=DEFAULT_PHASE)
+    parser.add_argument("--mixture", default=DEFAULT_MIXTURE, help="Comma-separated Molecule:count entries, e.g. CH4:6,O2:12,N2:4")
     parser.add_argument("--volume", type=float, default=_reference_volume_liters(sum(parse_mixture(DEFAULT_MIXTURE).values()), 1.0), help="Volume in liters")
     parser.add_argument("--molarity", type=float, default=1.0)
-    parser.add_argument("--temperature", type=float, default=300.0, help="Temperature in kelvin")
-    parser.add_argument("--pressure", type=float, default=101325.0, help="Pressure in pascals")
+    parser.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE_K, help="Temperature in kelvin")
+    parser.add_argument("--pressure", type=float, default=DEFAULT_PRESSURE_PA, help="Pressure in pascals")
     parser.add_argument("--disable-reactions", action="store_true")
     args = parser.parse_args()
 
