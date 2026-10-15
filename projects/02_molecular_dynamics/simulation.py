@@ -1773,8 +1773,8 @@ def build_molecular_dynamics_notebook():
         play.max = max(0, total_frames - 1)
         frame_slider.max = max(0, total_frames - 1)
         motion_image.value = frame_cache[0]
-        diagnostics_image.value = b""
-        diagnostics_ready = False
+        diagnostics_image.value = render_reaction_diagnostics_png(active_result)
+        diagnostics_ready = True
         total_events = int(np.sum(np.asarray(active_result.get("reaction_events_history", [0]), dtype=int)))
         if total_events <= 0:
             status.value = (
@@ -1792,7 +1792,7 @@ def build_molecular_dynamics_notebook():
             "For visible combustion products (CO2/H2O), keep O2 present and use gas phase near or above 850 K. "
             f"{run_hint} "
             "Sliders are in physical units: Kelvin, Liters, and Pascals. "
-            "Diagnostics plots are generated after the run reaches the final frame, or by clicking Analyze Run. "
+            "Diagnostics plots summarize the full computed trajectory and update with the controls. "
             "To change composition, stop, edit counts/species, then press Play again."
         )
 
@@ -1850,7 +1850,9 @@ def build_molecular_dynamics_notebook():
             widgets.HBox([species2, count2]),
             widgets.HBox([species3, count3]),
             widgets.HBox([play, frame_slider, analyze_button]),
+            widgets.HTML(value="<b>Molecular motion</b>"),
             motion_image,
+            widgets.HTML(value="<b>Full-trajectory diagnostics</b>"),
             diagnostics_image,
         ]
     )

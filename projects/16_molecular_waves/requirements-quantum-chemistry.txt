@@ -1,0 +1,3 @@
+# Optional self-consistent DFT solver for equation_explorer.py.
+pyscf>=2.10,<3
+geometric>=1.1,<2

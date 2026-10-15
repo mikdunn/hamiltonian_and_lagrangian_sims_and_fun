@@ -1,0 +1,2 @@
+# Optional molecular graphs, product rules, conformers and notebook structure images.
+rdkit>=2024.9
